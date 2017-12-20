@@ -20,7 +20,7 @@ find_package(
 	# tf2_ros
 	# tf
 	# pcl_ros
-	# Eigen REQUIRED
+	Eigen REQUIRED
 	# tf2
 	# gazebo_msgs
 	)
@@ -131,9 +131,9 @@ catkin_package(
     	sensor_msgs
     	std_msgs
 		# tf
-	# DEPENDS
+	DEPENDS
 	    # Boost
-	    # Eigen
+	    Eigen
 		# PCL
 #  INCLUDE_DIRS include
 #  LIBRARIES AutoNOMOS_simulation
@@ -149,7 +149,7 @@ catkin_package(
 include_directories(
 	include
 	${catkin_INCLUDE_DIRS} 
-	# ${Eigen_INCLUDE_DIRS} 
+	${Eigen_INCLUDE_DIRS} 
 	# ${PCL_INCLUDE_DIRS} 
 	)
 
@@ -183,7 +183,7 @@ add_executable(laser_proc_node src/laser_proc.cpp)
 # add_dependencies(${PROJECT_NAME}_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Specify libraries to link a library or executable target against
-target_link_libraries(laser_proc_node ${catkin_LIBRARIES} )
+target_link_libraries(laser_proc_node ${catkin_LIBRARIES} ${Eigen_LIBRARIES})
 
 #############
 ## Install ##

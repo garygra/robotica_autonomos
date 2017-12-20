@@ -7,14 +7,29 @@
 #include <sensor_msgs/LaserScan.h>
 #include <string>
 #include <tuple>
+#include <Eigen/Dense>
 
 // #include <bits/stdc++.h>
 using namespace std;
+using namespace eigen;
 // #define ARRAY_SIZE(array) (sizeof((array))/sizeof((array[0])))
 #define RATE_HZ 10
 
-typedef vector< tuple<float, float > > distances;
+typedef vector< tuple<float, float > > distances; // tuple: < num of angle, distance >
+typedef vector< tuple<int, int, float, float, float > > objects; // distances tuple: < angle, num pts, average, min, max >
+
+VectorXf m_ant(4);
+MatrixXf cov_ant(4,4);
+VectorXf z_t(4);
+MatrixXf a_t(4,4);
+MatrixXf r_t(4,4);
+MatrixXf c_t(2,4);
+
+MatrixXf m_t(4,4);
+MatrixXf s_t(4,4);
+
 distances dists; 
+objects objs;
 vector<int>::iterator myIntVectorIterator;
 vector<int> laser_angs = {
 	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 
@@ -59,13 +74,14 @@ vector<int> laser_angs = {
 
 
 // manual_control/steering  (std_msgs/Int16)
-void get_laser_msg(const sensor_msgs::LaserScan& msg) {
+void get_laser_msg(const sensor_msgs::LaserScan& msg) 
+{
 	// for (int i = 0; i < msg.ranges.size(); ++i)
 	// {
 		// ROS_INFO_STREAM(i << " --- " << msg.ranges[i]);
 
 	// }
-
+	dists.clear();
 	for(myIntVectorIterator = laser_angs.begin(); 
         myIntVectorIterator != laser_angs.end();
         myIntVectorIterator++)
@@ -81,7 +97,65 @@ void get_laser_msg(const sensor_msgs::LaserScan& msg) {
 	// ROS_INFO_STREAM(dists);
 }
 
+void def_objs()
+{
+	int last_angle = 0, cont = 0;
+	float sum = 0, max_val = 0, min_val = 0;
+	objs.clear();
+	for (distances::const_iterator i = dists.begin(); i != dists.end(); ++i) 
+	{
+		// ROS_INFO_STREAM("angle: " << get<0>(*i) << "\tdist:" << get<1>(*i) );
 
+		if(last_angle + 1 == get<0>(*i))
+		{
+			sum += get<1>(*i);
+			cont++;
+			max_val = get<1>(*i) > max_val ? get<1>(*i) : max_val;
+			min_val = get<1>(*i) < min_val ? get<1>(*i) : min_val;
+		} else { // a new object or the first one detected
+			
+			if ( sum != 0)
+			{
+				objs.push_back(tuple<int, int, float, float, float>(get<0>(*i), cont, sum / cont, max_val, min_val));
+			}
+			sum = get<1>(*i);
+			cont = 1;
+			max_val = get<1>(*i);
+			min_val = get<1>(*i);
+		}
+		last_angle = get<0>(*i);
+	}
+
+	// check if the last angles detected a object ==> concat with the first angles.
+	if(last_angle == 359)
+	{	
+		last_angle = 360 - cont;
+		cont += get<1>(objs[0]);
+		sum += get<2>(objs[0]) * get<1>(objs[0]);
+		max_val = get<3>(objs[0]) > max_val ? get<3>(objs[0]) : max_val;
+		min_val = get<4>(objs[0]) < min_val ? get<4>(objs[0]) : min_val;
+
+		get<0>(objs[0]) = last_angle;
+		get<1>(objs[0]) = cont;
+		get<2>(objs[0]) = sum / cont;
+		get<3>(objs[0]) = max_val;
+		get<4>(objs[0]) = min_val;
+	}
+}
+
+void kalman_filter()
+{
+	MatrixXf m_hat = a_t * m_ant;
+	MatrixXf cov_hat = a_t * cov_ant * a_t.transpose() + r_t;
+
+	MatrixXf s_aux = c_t * cov_hat * c_t.transpose() ; // Falta la Q
+
+	MatrixXf k_t = cov_hat * c_t.transpose() * s_aux.inverse();
+
+	m_t = m_hat + k_t * ( z_t  - c_t * m_hat);
+
+	s_t = (MatrixXf::Identity(4,4) - k_t * c_t) * cov_hat; 
+}
 int main(int argc, char **argv){
 	ros::init(argc,argv,"laser_proc_node");
 	ros::NodeHandle nh("~");
@@ -100,11 +174,18 @@ int main(int argc, char **argv){
 
 
 		// pub_cur.publish(car_pose);
-		
-  		for (distances::const_iterator i = dists.begin(); i != dists.end(); ++i) 
+		def_objs();
+		ROS_INFO_STREAM("=======================DISTANCES===========================");
+		for (distances::const_iterator i = dists.begin(); i != dists.end(); ++i) 
 		{
-			ROS_INFO_STREAM("angle: " << get<0>(*i) << "\tdist:" << get<1>(*i) );
+			ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << " >");
 		}
+		ROS_INFO_STREAM("=======================OBJECTS=============================");
+  		for (objects::const_iterator i = objs.begin(); i != objs.end(); ++i) 
+		{
+			ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << ",\t" << get<2>(*i) << ",\t" << get<3>(*i) << ",\t" << get<4>(*i) <<" >");
+		}
+		// ROS_INFO_STREAM("===========================================================");
 		ros::spinOnce();
 		rate.sleep();
     }
