@@ -8,12 +8,14 @@
 #include <string>
 #include <tuple>
 #include <Eigen/Dense>
+#include <std_msgs/Float32.h>
+#include <signal.h>
 
 // #include <bits/stdc++.h>
 using namespace std;
 using namespace Eigen;
 // #define ARRAY_SIZE(array) (sizeof((array))/sizeof((array[0])))
-#define RATE_HZ 1
+#define RATE_HZ 10
 
 typedef vector< tuple<float, float > > distances; // tuple: < num of angle, distance >
 typedef vector< tuple<int, int, float, float, float > > objects; // distances tuple: < angle, num pts, average, min, max >
@@ -21,18 +23,26 @@ typedef vector< tuple<int, int, float, float, float > > objects; // distances tu
 int index_max_cont;
 float x_obs, y_obs;
 bool laser_received = false;
+float theta_object = 0;
+int delay_cont = 0;
+int delay = 50;
+
+float sum_errs = 0;
 
 VectorXf m_ant(4);
 MatrixXf cov_ant(4,4);
 VectorXf z_t(4);
 MatrixXf a_t(4,4);
 MatrixXf r_t(4,4);
+MatrixXf q_t(2,2);
 MatrixXf c_t(2,4);
 
 VectorXf m_t(4);
 MatrixXf cov_t(4,4);
 
 VectorXf edos(4);
+
+ros::Publisher pub_velocity;
 
 distances dists; 
 objects objs;
@@ -87,7 +97,7 @@ void get_laser_msg(const sensor_msgs::LaserScan& msg)
 		// ROS_INFO_STREAM(i << " --- " << msg.ranges[i]);
 
 	// }
-	ROS_INFO_STREAM("At get_laser_msg");
+	// ROS_INFO_STREAM("At get_laser_msg");
 	dists.clear();
 	laser_received = true;
 	for(myIntVectorIterator = laser_angs.begin(); 
@@ -122,11 +132,12 @@ void def_objs()
 			cont++;
 			max_val = get<1>(*i) > max_val ? get<1>(*i) : max_val;
 			min_val = get<1>(*i) < min_val ? get<1>(*i) : min_val;
+			ROS_INFO_STREAM("val: " << get<0>(*i));
 		} else { // a new object or the first one detected
 			
 			if ( sum != 0)
 			{
-				objs.push_back(tuple<int, int, float, float, float>(get<0>(*i), cont, sum / cont, max_val, min_val));
+				objs.push_back(tuple<int, int, float, float, float>(last_angle - cont + 1, cont, sum / cont, max_val, min_val));
 				
 				ROS_INFO_STREAM("max_cont: " << max_cont << "\t cont: " << cont);
 				index_max_cont = cont > max_cont ? index_max_cont + 1 : index_max_cont;
@@ -140,16 +151,13 @@ void def_objs()
 		last_angle = get<0>(*i);
 	}
 
-	if(objs.size() == 0 && sum != 0)
-	{
-		objs.push_back(tuple<int, int, float, float, float>(last_angle, cont, sum / cont, max_val, min_val));
-		index_max_cont = 1;
 
-	}
+	
 
 	// check if the last angles detected a object ==> concat with the first angles.
 	if(last_angle == 359)
 	{	
+		ROS_INFO_STREAM("At last_angle");
 		last_angle = 360 - cont;
 		cont += get<1>(objs[0]);
 		sum += get<2>(objs[0]) * get<1>(objs[0]);
@@ -162,17 +170,32 @@ void def_objs()
 		get<2>(objs[0]) = sum / cont;
 		get<3>(objs[0]) = max_val;
 		get<4>(objs[0]) = min_val;
+	} else if( sum != 0 )
+	{
+		objs.push_back(tuple<int, int, float, float, float>(last_angle - cont + 1, cont, sum / cont, max_val, min_val));
+		index_max_cont = cont > max_cont ? index_max_cont + 1 : index_max_cont;
+		ROS_INFO_STREAM("Last object");
+
 	}
 }
 
 void define_xy()
 {
-	ROS_INFO_STREAM("index_max_cont: " << index_max_cont);
-	if(index_max_cont > 0)
+	// ROS_INFO_STREAM("index_max_cont: " << index_max_cont);
+	int max_obj = -1, index_obj = -1;
+	for (objects::const_iterator i = objs.begin(); i != objs.end(); ++i)
 	{
-		
-		x_obs = get<2>(objs[index_max_cont-1]) * cos ( M_PI * (get<0>(objs[index_max_cont-1]) + get<1>(objs[index_max_cont-1]) / 2.0 ) / 180.0 );
-		y_obs = -get<2>(objs[index_max_cont-1]) * sin ( M_PI * (get<0>(objs[index_max_cont-1]) + get<1>(objs[index_max_cont-1]) / 2.0 ) / 180.0 );
+		index_obj = get<1>(*i) > max_obj ? index_obj + 1 : index_obj;
+		max_obj = get<1>(*i) > max_obj ? get<1>(*i) : max_obj;
+	}
+	ROS_INFO_STREAM("Max obj is: " << max_obj << " index_obj:" << index_obj);
+	if(index_obj >= 0)
+	{
+		ROS_INFO_STREAM("angle: " << get<0>(objs[index_obj]) << " cont: " << get<1>(objs[index_obj]));
+		theta_object = 	( get<0>(objs[index_obj]) + get<1>(objs[index_obj]) / 2 ) % 360;
+		ROS_INFO_STREAM("theta_object is: " << theta_object); 
+		x_obs =  get<2>(objs[index_obj]) * cos ( M_PI * ( theta_object) / 180.0 );
+		y_obs = -get<2>(objs[index_obj]) * sin ( M_PI * ( theta_object) / 180.0 );
 		ROS_INFO_STREAM("x_obs: " << x_obs << "\ty_obs: " << y_obs);
 	}
 }
@@ -186,7 +209,7 @@ void kalman_filter()
 	MatrixXf cov_hat = a_t * cov_ant * a_t.transpose() + r_t;
 	// ROS_INFO_STREAM("cov_ant\n" << cov_ant);
 	// ROS_INFO_STREAM("cov_hat:\n" << cov_hat);
-	MatrixXf s_aux = c_t * cov_hat * c_t.transpose() ; // Falta la Q
+	MatrixXf s_aux = c_t * cov_hat * c_t.transpose()  + q_t; // Falta la Q
 	// ROS_INFO_STREAM("s_aux\n" << s_aux);
 	// ROS_INFO_STREAM("s_inversa\n" << s_aux.inverse());
 	MatrixXf k_t = cov_hat * c_t.transpose() * s_aux.inverse();
@@ -202,6 +225,42 @@ void kalman_filter()
 	// ROS_INFO_STREAM("cov_t\n" << cov_t);
 }
 
+float scale_theta()
+{
+	float res = 0;
+	if (0 <= theta_object && theta_object <= 28)
+	{
+		res = theta_object;
+	} else if (332 <= theta_object && theta_object <= 359 )
+	{
+		res = theta_object - 360;
+	}
+	return res;
+}
+
+void mySigintHandler(int sig)
+{
+	std_msgs::Float32 last_vel;
+	last_vel.data = 0;
+
+	ROS_INFO_STREAM("Sending last vel: " << last_vel.data);
+	pub_velocity.publish(last_vel);
+	ros::shutdown();
+}
+
+float det_velocity(float xp_target, float xp_now)
+{
+	float error = xp_target - xp_now;
+	sum_errs += error;
+
+	float kp = 0, ki = 1.9;
+	float res = kp * error + ki * sum_errs;
+
+	ROS_INFO_STREAM("GARY ,error, " << error << ", sum_errs, " << sum_errs << ", res, " << res << ", xp_target, " << xp_target << ", xp_now, " << xp_now);
+	// res = res > 0.01 ? 2 : res; 
+	return res;
+}
+
 int main(int argc, char **argv){
 	ros::init(argc,argv,"laser_proc_node");
 	ros::NodeHandle nh("~");
@@ -214,25 +273,26 @@ int main(int argc, char **argv){
 	// ROS_INFO_STREAM("The steering kp values is: " << kp);
 	ros::Subscriber sub_steering = nh.subscribe("/AutoNOMOS_mini_1/laser_scan", 1, &get_laser_msg);
 	ros::Publisher pub_steering = nh.advertise<std_msgs::Float32> (topic_steering, 1);
-	ros::Publisher pub_velocity = nh.advertise<std_msgs::Float32> (topic_velocity, 1);
+	pub_velocity = nh.advertise<std_msgs::Float32> (topic_velocity, 1);
 	ros::Rate rate(RATE_HZ);
 
 
 	// m << 1, 2, 3,
  //     4, 5, 6,
  //     7, 8, 9;
-
+	float delta_t = 1 / (double ) RATE_HZ;
+	ROS_INFO_STREAM("delta_t: " << delta_t);
 	c_t << 1, 0, 0, 0,
 		   0, 1, 0, 0;
 
-    a_t << 1, 0,   1, 0,
-    	   0, 1,   1, 0,
+    a_t << 1, 0,   delta_t, 0,
+    	   0, 1,   delta_t, 0,
     	   0, 0,   1, 0, 
     	   0, 0,   0, 1;
 
-    edos << 1, 1, 0, 0;
+    edos << 1, 1, 1, 1;
 
-    m_t << 1,1,0,0;
+    m_t << 1, 1, 1 ,1;
     cov_t << 1, 0, 0, 0,
     		 0, 1, 0, 0,
     		 0, 0, 1, 0,
@@ -242,6 +302,9 @@ int main(int argc, char **argv){
     		0, 1, 0, 0,
     		0, 0, 1, 0,
     	    0, 0, 0, 1; 
+
+   	q_t << 1, 0,
+   	 	   0, 1;
     ROS_INFO_STREAM("gral m_t 0: \n" << m_t );
     // ros::spinOnce();
     // rate.sleep();
@@ -252,10 +315,10 @@ int main(int argc, char **argv){
     // rate.sleep();
     // rate.sleep();
     // rate.sleep();
-
+    signal(SIGINT, mySigintHandler);
     // ros::spinOnce();
     ros::spinOnce();
-    std_msgs::Float32 steering;
+    std_msgs::Float32 steering, velocity;
 	while (ros::ok())
 	{	
 
@@ -264,17 +327,17 @@ int main(int argc, char **argv){
 			// ROS_INFO_STREAM("gral m_t 0: \n" << m_t );
 			// pub_cur.publish(car_pose);
 			def_objs();
-			// ROS_INFO_STREAM("=======================DISTANCES===========================");
-			// for (distances::const_iterator i = dists.begin(); i != dists.end(); ++i) 
-			// {
-			// 	ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << " >");
-			// }
-			// ROS_INFO_STREAM("=======================OBJECTS=============================");
-  	// 		for (objects::const_iterator i = objs.begin(); i != objs.end(); ++i) 
-			// {
-			// 	ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << ",\t" << get<2>(*i) << ",\t" << get<3>(*i) << ",\t" << get<4>(*i) <<" >");
-			// }
-			// ROS_INFO_STREAM("===========================================================");
+			ROS_INFO_STREAM("=======================DISTANCES===========================");
+			for (distances::const_iterator i = dists.begin(); i != dists.end(); ++i) 
+			{
+				ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << " >");
+			}
+			ROS_INFO_STREAM("=======================OBJECTS=============================");
+  			for (objects::const_iterator i = objs.begin(); i != objs.end(); ++i) 
+			{
+				ROS_INFO_STREAM("< " << get<0>(*i) << ",\t" << get<1>(*i) << ",\t" << get<2>(*i) << ",\t" << get<3>(*i) << ",\t" << get<4>(*i) <<" >");
+			}
+			ROS_INFO_STREAM("===========================================================");
 
 		
 			define_xy();
@@ -293,10 +356,17 @@ int main(int argc, char **argv){
 			kalman_filter();
 			// ROS_INFO_STREAM("3");
 			ROS_INFO_STREAM("estimación:\n" << m_t);
-			velocity.data = m_t[2]
-			ROS_INFO_STREAM("velocity:\n" << velocity.data);
-			steering.data = m_t[2];
-			pub_steering.publish();
+			if(delay < delay_cont)
+			{
+				velocity.data = det_velocity(m_t[2], velocity.data/300);//m_t[2] > 2 ? 2 : m_t[2];
+				ROS_INFO_STREAM("velocity: " << velocity.data);
+				steering.data = scale_theta();
+				ROS_INFO_STREAM("steering: " << steering.data);
+				pub_steering.publish(steering);
+				pub_velocity.publish(velocity);
+			} else {
+				delay_cont++;
+			}
 		} else {
 			ROS_INFO_STREAM("laser not received");
 		}
